@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="th">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>วิ่งไรนี้</title>
+    <link rel="stylesheet" href="page.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+
+<body>
+
+    <!-- หน้าล็อกอิน -->
+    <div id="authView" class="auth hidden">
+        <h1>🏃 แผนซ้อมวิ่งของฉัน</h1>
+        <p>เข้าสู่ระบบเพื่อดูและแก้ไขแผนซ้อมของคุณ</p>
+        <label for="email">อีเมล</label>
+        <input id="email" type="email" autocomplete="email">
+        <label for="password">รหัสผ่าน (อย่างน้อย 6 ตัว)</label>
+        <input id="password" type="password" autocomplete="current-password">
+        <div class="actions">
+            <button class="btn btn-primary" id="loginBtn">เข้าสู่ระบบ</button>
+            <button class="btn btn-ghost" id="signupBtn">สมัครสมาชิก</button>
+        </div>
+        <div id="authMsg" class="msg"></div>
+    </div>
+
+    <!-- หน้าหลัก -->
+    <div id="appView" class="wrap hidden">
+        <header>
+            <h1>🏃 แผนซ้อมวิ่งของฉัน</h1>
+            <button class="btn btn-ghost" id="logoutBtn">ออกจากระบบ</button>
+        </header>
+
+        <section id="todayBox" class="today empty"></section>
+
+        <h3 class="section">แผนประจำสัปดาห์</h3>
+        <div id="grid" class="grid"></div>
+    </div>
+
+    <script>
+        const SUPABASE_URL = 'https://vwzxkhurmyllezghbjrx.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_m1PprQgl9T7iiMvr4bMJiQ_h6JWKUMy';
+        const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        const DAYS = [
+            { n: 1, name: 'จันทร์' }, { n: 2, name: 'อังคาร' }, { n: 3, name: 'พุธ' },
+            { n: 4, name: 'พฤหัสบดี' }, { n: 5, name: 'ศุกร์' }, { n: 6, name: 'เสาร์' }, { n: 7, name: 'อาทิตย์' }
+        ];
+        let plans = {};
+        let session = null;
+        const $ = (id) => document.getElementById(id);
+        const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        // วันนี้ตามเวลาไทย: 1=จันทร์ ... 7=อาทิตย์
+        function todayNumber() {
+            const wd = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'Asia/Bangkok' }).format(new Date());
+            return { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[wd];
+        }
+
+        /* auth*/
+        function showAuth() { $('authView').classList.remove('hidden'); $('appView').classList.add('hidden'); }
+        function showApp() { $('authView').classList.add('hidden'); $('appView').classList.remove('hidden'); }
+        function authMsg(text, ok = false) { const m = $('authMsg'); m.textContent = text; m.className = 'msg' + (ok ? ' ok' : ''); }
+
+        $('loginBtn').onclick = async () => {
+            authMsg('');
+            const { error } = await db.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+            if (error) authMsg(error.message);
+        };
+        $('signupBtn').onclick = async () => {
+            authMsg('');
+            const { data, error } = await db.auth.signUp({ email: $('email').value.trim(), password: $('password').value });
+            if (error) return authMsg(error.message);
+            if (!data.session) authMsg('สมัครแล้ว กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ', true);
+        };
+        $('logoutBtn').onclick = () => db.auth.signOut();
+
+        db.auth.onAuthStateChange((_event, s) => { session = s; init(); });
+
+        /* data */
+        async function loadPlans() {
+            const { data, error } = await db.from('workout_plan').select('*');
+            if (error) { alert('โหลดข้อมูลไม่สำเร็จ: ' + error.message); return; }
+            plans = {};
+            data.forEach(r => plans[r.day_of_week] = r);
+        }
+
+        async function savePlan(n) {
+            const card = document.querySelector(`[data-day="${n}"]`);
+            const isRest = card.querySelector('.f-rest').checked;
+            let title = card.querySelector('.f-title').value.trim();
+            if (isRest && !title) title = 'พัก';
+            if (!title) { setSaved(card, 'กรุณากรอกชื่อรูปแบบการวิ่ง หรือติ๊กวันพัก', true); return; }
+            const num = (sel) => { const v = card.querySelector(sel).value; return v === '' ? null : Number(v); };
+            const pace = card.querySelector('.f-pace').value.trim() || null;
+            if (pace && !/^\d{1,2}:\d{2}$/.test(pace)) { setSaved(card, 'เพซต้องเป็นรูปแบบ 5:30', true); return; }
+            const row = {
+                user_id: session.user.id,
+                day_of_week: n,
+                title,
+                is_rest: isRest,
+                distance_km: isRest ? null : num('.f-distance'),
+                pace: isRest ? null : pace,
+                sets: isRest ? null : num('.f-sets'),
+                updated_at: new Date().toISOString()
+            };
+            const { data, error } = await db.from('workout_plan').upsert(row, { onConflict: 'user_id,day_of_week' }).select().single();
+            if (error) { setSaved(card, error.message, true); return; }
+            plans[n] = data;
+            renderToday();
+            card.querySelector('.btn-danger').disabled = false;
+            if (isRest) card.querySelector('.f-title').value = title;
+            setSaved(card, 'บันทึกแล้ว ✓');
+        }
+
+        async function deletePlan(n) {
+            if (!plans[n]) return;
+            if (!confirm('ลบแผนของวัน' + DAYS[n - 1].name + ' ?')) return;
+            const { error } = await db.from('workout_plan').delete().eq('id', plans[n].id);
+            if (error) { alert(error.message); return; }
+            delete plans[n];
+            renderToday();
+            const card = document.querySelector(`[data-day="${n}"]`);
+            card.querySelectorAll('input[type=text],input[type=number]').forEach(i => i.value = '');
+            card.querySelector('.f-rest').checked = false;
+            card.querySelector('.fields').classList.remove('hidden');
+            card.querySelector('.btn-danger').disabled = true;
+            setSaved(card, 'ลบแล้ว');
+        }
+
+        function setSaved(card, text, isErr = false) {
+            const el = card.querySelector('.saved');
+            el.textContent = text; el.style.color = isErr ? 'var(--danger)' : 'var(--green)';
+            if (!isErr) setTimeout(() => { el.textContent = ''; }, 2500);
+        }
+
+        /* โหลดข้อมูลวันนี้ */
+        function renderToday() {
+            const n = todayNumber();
+            const dayName = DAYS[n - 1].name;
+            const p = plans[n];
+            const box = $('todayBox');
+
+            if (!p) {
+                box.className = 'today empty';
+                box.innerHTML = `<small>วัน${dayName} • วันนี้</small><h2>ยังไม่ได้ตั้งแผนวันนี้</h2><div>กรอกแผนของวัน${dayName}ด้านล่างได้เลย</div>`;
+                return;
+            }
+            if (p.is_rest) {
+                box.className = 'today rest';
+                box.innerHTML = `<small>วัน${dayName} • วันนี้</small><h2>😴 ${esc(p.title)}</h2><div>วันนี้ให้ร่างกายได้ฟื้นตัว</div>`;
+                return;
+            }
+            const stats = [];
+            if (p.distance_km != null) stats.push(`<div class="stat"><b>${esc(p.distance_km)} กม.</b><span>ระยะทาง</span></div>`);
+            if (p.pace) stats.push(`<div class="stat"><b>${esc(p.pace)}</b><span>เพซเฉลี่ย (นาที/กม.)</span></div>`);
+            if (p.sets != null) stats.push(`<div class="stat"><b>${esc(p.sets)}</b><span>เซต / รอบ</span></div>`);
+            box.className = 'today';
+            box.innerHTML = `<small>วัน${dayName} • วันนี้ต้องวิ่ง</small><h2>🏃 ${esc(p.title)}</h2><div class="stats">${stats.join('')}</div>`;
+        }
+
+        function renderGrid() {
+            const t = todayNumber();
+            $('grid').innerHTML = DAYS.map(d => {
+                const p = plans[d.n] || {};
+                return `
+    <div class="day ${d.n === t ? 'is-today' : ''}" data-day="${d.n}">
+      <div class="day-head"><b>วัน${d.name}</b>${d.n === t ? '<span class="tag">วันนี้</span>' : ''}</div>
+
+      <label>ชื่อรูปแบบการวิ่ง</label>
+      <input class="f-title" type="text" placeholder="เช่น Easy Run, Interval, Long Run" value="${esc(p.title)}">
+
+      <label class="check"><input class="f-rest" type="checkbox" ${p.is_rest ? 'checked' : ''}> วันพัก</label>
+
+      <div class="fields ${p.is_rest ? 'hidden' : ''}">
+        <div class="row">
+          <div><label>ระยะ (กม.)</label><input class="f-distance" type="number" step="0.01" min="0" value="${esc(p.distance_km)}"></div>
+          <div><label>เพซ (นาที/กม.)</label><input class="f-pace" type="text" placeholder="5:30" value="${esc(p.pace)}"></div>
+          <div><label>เซต / รอบ</label><input class="f-sets" type="number" min="1" step="1" value="${esc(p.sets)}"></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" onclick="savePlan(${d.n})">บันทึก</button>
+        <button class="btn btn-danger" onclick="deletePlan(${d.n})" ${p.id ? '' : 'disabled'}>ลบ</button>
+      </div>
+      <div class="saved"></div>
+    </div>`;
+            }).join('');
+
+            // ติ๊กวันพัก
+            document.querySelectorAll('.f-rest').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    cb.closest('.day').querySelector('.fields').classList.toggle('hidden', cb.checked);
+                });
+            });
+        }
+
+        /* เริ่มต้น */
+        async function init() {
+            if (!session) { showAuth(); return; }
+            showApp();
+            await loadPlans();
+            renderToday();
+            renderGrid();
+        }
+
+        // อัปเดตกล่อง "วันนี้" ทุกนาที
+        setInterval(() => { if (session) { renderToday(); } }, 60000);
+    </script>
+</body>
+
+</html>
